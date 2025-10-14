@@ -91,10 +91,10 @@ def markdown_to_rich_text_json_paragraphs(text: str, enforce_two: bool = False) 
 
 def parse_openai_markdown(content_md: str) -> Dict:
     """Parsea el contenido Markdown en secciones estructuradas: viñetas, faq respuestas, detalles, video."""
-    # Separar por encabezados ###
-    # Usamos regex para capturar secciones 1..4
+    # Separar por encabezados ##, ### o ####
+    # Usamos regex para capturar secciones 1..4 con cualquier número de almohadillas (2-4)
     sections = {}
-    pattern = re.compile(r"^###\s+(\d+)\.\s+([^\n]+)\n", re.MULTILINE)
+    pattern = re.compile(r"^#{2,4}\s+(\d+)\.\s+([^\n]+)\n", re.MULTILINE)
     indices = []
     for m in pattern.finditer(content_md):
         indices.append((m.start(), m.group(1), m.group(2)))
@@ -120,23 +120,37 @@ def parse_openai_markdown(content_md: str) -> Dict:
     faq_blocks = re.split(r"\n-\s+\*\*", sec2)
     # faq_blocks[0] es preámbulo antes del primer bullet; los siguientes empiezan con texto de pregunta
     for blk in faq_blocks[1:]:
-        # Separar la pregunta de la respuesta y tomar solo la respuesta.
-        # Casos soportados:
-        # 1) "Pregunta**\nRespuesta"
-        # 2) "Pregunta**: Respuesta" (misma línea tras ":")
-        # 3) "Pregunta** - Respuesta" (guion tras cierre bold)
-        # 4) "Pregunta:** Respuesta" (dos puntos dentro del bold, respuesta tras cerrar **)
-        # 5) "Pregunta**  Respuesta" (espacio tras cierre bold)
-        parts = re.split(r"\*\*\s*\n", blk, maxsplit=1)
-        if len(parts) == 2:
-            answer = parts[1]
-        else:
-            parts = re.split(r"\*\*\s*[:\-–—]\s*", blk, maxsplit=1)
+        # SOLUCIÓN 4: Enfoque robusto de dos pasos para extraer respuestas de FAQ
+        # Formato esperado: '¿Pregunta?** [separador opcional] Respuesta'
+        # IMPORTANTE: Maneja respuestas con negritas internas (ej: "Incluye **motor** y **dirección**")
+
+        answer = None
+
+        # Paso 1: Buscar dónde termina la pregunta ('?**')
+        # Las preguntas de FAQ siempre terminan con signo de interrogación
+        question_end = blk.find('?**')
+        if question_end != -1:
+            # Extraer todo después de '?**'
+            answer = blk[question_end + 3:].strip()
+            # Limpiar separador opcional al inicio (: o - o guión largo)
+            answer = re.sub(r"^[:\-–—]\s*", "", answer)
+
+        # Fallback 1: Intentar split por **\n (pregunta en una línea, respuesta en otra)
+        if not answer:
+            parts = re.split(r"\*\*\s*\n", blk, maxsplit=1)
             if len(parts) == 2:
                 answer = parts[1]
-            else:
-                parts = re.split(r"\*\*\s+", blk, maxsplit=1)
-                answer = parts[1] if len(parts) == 2 else blk
+
+        # Fallback 2: Buscar primer cierre de ** seguido de espacio (sin negritas en pregunta)
+        if not answer:
+            parts = re.split(r"\*\*\s+", blk, maxsplit=1)
+            if len(parts) == 2:
+                answer = parts[1]
+
+        # Fallback final: usar todo el bloque (caso raro)
+        if not answer:
+            answer = blk
+
         # Limpiar respuesta: unir líneas con espacios y recortar
         answer = re.sub(r"\s+", " ", answer).strip()
         if answer:
@@ -515,6 +529,48 @@ def main():
         raise SystemExit("El JSON de entrada no contiene 'content' con Markdown")
 
     parsed = parse_openai_markdown(content_md)
+
+    # VALIDACIÓN: Verificar que el parsing extrajo datos válidos
+    has_bullets = len(parsed.get("bullets", [])) > 0
+    has_faq = len(parsed.get("faq_answers", [])) > 0
+    has_details = len(parsed.get("details", {})) > 0
+    has_video_title = parsed.get("video_title") is not None
+    has_video_body = parsed.get("video_body") is not None
+
+    if not has_bullets and not has_faq and not has_details and not has_video_title and not has_video_body:
+        print("=" * 70)
+        print("❌ ERROR CRÍTICO: El parsing del contenido de OpenAI falló completamente.")
+        print("=" * 70)
+        print(f"\n📊 Resumen del parsing:")
+        print(f"   - Viñetas extraídas: {len(parsed.get('bullets', []))}")
+        print(f"   - FAQ extraídas: {len(parsed.get('faq_answers', []))}")
+        print(f"   - Detalles técnicos: {len(parsed.get('details', {}))}")
+        print(f"   - Video title: {'✓' if has_video_title else '✗'}")
+        print(f"   - Video body: {'✓' if has_video_body else '✗'}")
+        print(f"\n📄 Primeros 800 caracteres del contenido recibido:")
+        print("-" * 70)
+        print(content_md[:800])
+        print("-" * 70)
+        print("\n💡 Posibles causas:")
+        print("   1. OpenAI generó un formato de Markdown incompatible")
+        print("   2. Las secciones no están numeradas (### 1. Viñetas, ### 2. FAQ, etc.)")
+        print("   3. El contenido no sigue la estructura esperada del prompt")
+        print("\n🔧 Soluciones:")
+        print("   1. Revisa el archivo: " + args.input_json)
+        print("   2. Verifica que OpenAI generó secciones con ### 1., ### 2., etc.")
+        print("   3. Re-ejecuta el scraper para obtener una nueva respuesta de OpenAI")
+        print("=" * 70)
+        raise SystemExit(1)
+
+    # Advertencia si falta contenido importante
+    if not has_bullets:
+        print("⚠️  ADVERTENCIA: No se encontraron viñetas en el contenido")
+    if not has_faq:
+        print("⚠️  ADVERTENCIA: No se encontraron respuestas de FAQ en el contenido")
+    if not has_details:
+        print("⚠️  ADVERTENCIA: No se encontraron detalles técnicos en el contenido")
+
+    print(f"✅ Validación exitosa: {len(parsed.get('bullets', []))} viñetas, {len(parsed.get('faq_answers', []))} FAQs, {len(parsed.get('details', {}))} detalles técnicos\n")
 
     if args.ids_json:
         with open(args.ids_json, "r", encoding="utf-8") as f:
