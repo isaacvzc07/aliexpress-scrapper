@@ -21,9 +21,9 @@ This project automates the complete workflow of scraping product information fro
 
 ### **What It Does**
 
-1. **Scrapes AliExpress Products** - Captures product images using Playwright browser automation
-2. **AI-Powered Copywriting** - Analyzes images with OpenAI Vision API to generate compelling product descriptions
-3. **Shopify Integration** - Automatically updates product metafields with structured content
+1. **Scrapes AliExpress Products** - Downloads product images directly from AliExpress CDN in full resolution
+2. **AI-Powered Copywriting** - Analyzes images with OpenAI Vision API to generate compelling product descriptions and creative product names
+3. **Shopify Integration** - Automatically updates product titles and metafields with structured content
 4. **Robust Parsing** - Handles multiple markdown formats and validates content before updating
 
 ---
@@ -35,18 +35,22 @@ This project automates the complete workflow of scraping product information fro
 - Custom copywriting prompts for product marketing
 - Supports multiple product images analysis
 - Generates structured content: bullets, FAQs, technical details, and video sections
+- **NEW:** Automatic creative product name generation avoiding copyrighted brands
 
 ### 🎯 **Smart Product Scraping**
-- Automated AliExpress carousel image capture
-- Hover-based thumbnail navigation
-- High-resolution screenshots (1280x720)
-- Handles dynamic content loading
+- Direct image download from AliExpress CDN
+- Full resolution images (no quality loss)
+- Extracts images from product data object (`window._d_c_.DCData.imagePathList`)
+- Fast and efficient (no screenshot delays)
+- Headless browser automation with Playwright
 
 ### 🔄 **Shopify Metafields Management**
 - Automatic metafield creation and updates via GraphQL
+- **NEW:** Automatic product title updates with generated names
 - Support for multiple metafield types (rich_text, number, single_line_text)
 - Batch operations (up to 25 metafields per request)
 - Automatic type conversion and validation
+- Non-interactive mode for automated workflows
 
 ### 🛡️ **Robust Error Handling**
 - Content validation before Shopify updates
@@ -177,16 +181,16 @@ py scraper_hover_carrusel.py
 **Interactive Steps:**
 
 1. Enter AliExpress product URL
-2. Confirm scraping configuration
-3. Wait for image capture and AI analysis
-4. Enter Shopify product ID
-5. Automatic metafield updates
+2. Wait for image download and AI analysis (fully automated)
+3. Enter Shopify product ID
+4. Automatic product title and metafield updates
 
 **Output:** `hover_carrusel/producto_<ID>/`
-- `rich_text_field.json` - AI-generated content
+- `rich_text_field.json` - AI-generated content with product name
 - `analisis_copywriting_openai.html` - Formatted analysis
+- `analisis_copywriting_openai.json` - Raw OpenAI response
 - `metafields_<shopify_id>.json` - Updated metafields
-- `imagenes/` - Captured screenshots
+- `imagenes/` - Downloaded product images (full resolution)
 
 ---
 
@@ -212,6 +216,7 @@ py generate_and_put_metafields.py `
 - `--shop` - Shopify shop subdomain (optional, uses `.env`)
 - `--token` - Shopify access token (optional, uses `.env`)
 - `--out-json` - Save generated updates to file (optional)
+- `--auto-update-title` - Update product title automatically without confirmation (optional)
 
 ---
 
@@ -256,8 +261,9 @@ py -m uvicorn shopify_api:app --host 127.0.0.1 --port 8000
 
 ```
 aliexpress-scrapper/
-├── scraper_hover_carrusel.py          # Main scraper with OpenAI integration
-├── generate_and_put_metafields.py     # Metafield updater (robust parsing)
+├── scraper_hover_carrusel.py          # Main scraper with image downloader
+├── image_downloader.py                # Direct CDN image downloader
+├── generate_and_put_metafields.py     # Metafield & title updater (robust parsing)
 ├── fetch_product_metafields_to_json.py # Metafield exporter
 ├── convert_analisis_copywriting_to_json.py # HTML to JSON converter
 ├── shopify_api.py                     # FastAPI server for UI inspection
@@ -267,11 +273,11 @@ aliexpress-scrapper/
 ├── README.md                          # This file
 └── hover_carrusel/                    # Output directory (auto-created)
     └── producto_<ID>/
-        ├── rich_text_field.json       # AI-generated content
+        ├── rich_text_field.json       # AI-generated content with product name
         ├── analisis_copywriting_openai.html
         ├── analisis_copywriting_openai.json
         ├── metafields_<shopify_id>.json
-        └── imagenes/                  # Captured screenshots
+        └── imagenes/                  # Downloaded images (full resolution)
 ```
 
 ---
@@ -280,7 +286,14 @@ aliexpress-scrapper/
 
 ### **Metafields Structure**
 
-The scraper generates and updates the following metafields:
+The scraper generates and updates the following:
+
+**Product Title** (updated via REST API):
+- Creative name avoiding copyrighted brands
+- Format: `NombreDelProducto (XXX pzas)`
+- Example: `Chispa Ratón (116 pzas)`, `Dragón Guardián (524 pzas)`
+
+**Metafields** (under `custom` namespace):
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -292,31 +305,38 @@ The scraper generates and updates the following metafields:
 | `sec5_title` | `single_line_text_field` | Video section title |
 | `sec5_body` | `rich_text_field` | Video section body (2 paragraphs) |
 
-All metafields are created under the `custom` namespace.
-
 ---
 
 ### **Customizing OpenAI Prompt**
 
-Edit the copywriting prompt in `scraper_hover_carrusel.py` (lines 414-463):
+Edit the copywriting prompt in `scraper_hover_carrusel.py` (lines ~134-204):
 
 ```python
-copywriting_prompt = {
-    "intro": "Your custom instructions...",
-    "style": {
-        "audience": "young adults",
-        "tone": "playful, modern",
-        # ...
-    },
-    # ...
-}
+prompt_text = """Eres un copywriter profesional especializado en crear ofertas irresistibles...
+
+FORMATO DE SALIDA REQUERIDO (usar EXACTAMENTE este formato):
+
+## 0. Nombre del Producto
+
+[Nombre creativo sin marcas registradas] (XXX pzas)
+
+INSTRUCCIONES para nombre:
+- Crear nombre único y atractivo basado en el producto
+- NO usar marcas (LEGO, Disney, Marvel, etc.)
+- SIEMPRE incluir número de piezas: (XXX pzas)
+
+## 1. Viñetas
+...
+"""
 ```
+
+**Important:** The prompt is now a plain text string (not JSON) to ensure OpenAI generates Markdown format.
 
 ---
 
 ### **Adjusting Temperature**
 
-Control OpenAI response creativity in `scraper_hover_carrusel.py` (line 533):
+Control OpenAI response creativity in `scraper_hover_carrusel.py` (lines ~230-240):
 
 ```python
 response = self.openai_client.chat.completions.create(
@@ -326,6 +346,19 @@ response = self.openai_client.chat.completions.create(
     temperature=0.7  # Lower = more consistent, Higher = more creative
 )
 ```
+
+### **Image Downloader Configuration**
+
+The image downloader is configured in `image_downloader.py`:
+
+```python
+def get_full_image_url(image_url: str) -> str:
+    """Remove thumbnail suffixes to get full resolution images"""
+    # Removes: _80x80.jpg, _50x50.jpg, etc.
+    return re.sub(r'_\d+x\d+(\.[a-zA-Z]+)$', r'\1', image_url)
+```
+
+You can modify the regex pattern to handle different CDN formats if needed.
 
 ---
 
@@ -373,11 +406,13 @@ python3 -m playwright install
 **Error:** `❌ ERROR CRÍTICO: El parsing del contenido de OpenAI falló`
 
 **Causes:**
-- OpenAI returned non-standard format
+- OpenAI returned JSON instead of Markdown (fixed in v1.2.0)
 - Content doesn't follow expected structure
+- Missing section headers
 
 **Solutions:**
-- Check `rich_text_field.json` content
+- Check `rich_text_field.json` or `analisis_copywriting_openai.json` content
+- Verify prompt is using plain text format (not JSON dict)
 - Re-run scraper to get fresh OpenAI response
 - Review error diagnostics (shows first 800 chars)
 
@@ -417,6 +452,24 @@ The parser handles multiple OpenAI response formats:
 - Validates content before updating Shopify
 - Multiple fallback strategies for edge cases
 
+#### **Direct CDN Image Downloads**
+
+New in v1.2.0 - replaces screenshot system:
+- Extracts image URLs from `window._d_c_.DCData.imagePathList`
+- Downloads full-resolution images directly from AliExpress CDN
+- Removes thumbnail suffixes (`_80x80.jpg`, `_50x50.jpg`) for best quality
+- ~47% faster than screenshot-based approach
+- No delays for hover actions or page rendering
+
+#### **Product Name Generation**
+
+New in v1.2.0 - AI-generated creative names:
+- Analyzes product images to understand the item
+- Creates unique names avoiding copyrighted brands (LEGO, Disney, Marvel, etc.)
+- Format: `NombreDelProducto (XXX pzas)` (includes piece count)
+- Automatically updates Shopify product title via REST API
+- Examples: `Chispa Ratón (116 pzas)`, `Dragón Guardián (524 pzas)`
+
 #### **Smart FAQ Extraction**
 
 New implementation (Solution 4) prevents truncation:
@@ -450,6 +503,17 @@ Contributions are welcome! Please follow these guidelines:
 ## 📝 Changelog
 
 ### **Recent Updates**
+
+#### **v1.2.0 (2025-10-15)** 🎉
+- ⚡ **BREAKING:** Replaced screenshot system with direct CDN image downloads (~47% faster)
+- ✨ Added automatic product name generation avoiding copyrighted brands
+- 🏷️ Implemented automatic Shopify product title updates via REST API
+- 🐛 Fixed OpenAI generating JSON instead of Markdown (simplified prompt structure)
+- 🐛 Fixed section headers appearing in body content (`sec5_body`)
+- 🤖 Added `--auto-update-title` flag for non-interactive workflows
+- 📦 New `image_downloader.py` module for full-resolution image extraction
+- 🔧 Changed to headless browser mode for better performance
+- 📖 Class renamed: `AliExpressHoverScraper` → `AliExpressImageScraper`
 
 #### **v1.1.0 (2025-10-14)**
 - ✨ Enhanced markdown parser to accept multiple header formats
