@@ -103,7 +103,15 @@ def parse_openai_markdown(content_md: str) -> Dict:
     for i in range(len(indices) - 1):
         start, num, title = indices[i]
         end, _, _ = indices[i + 1]
-        body = content_md[start:end]
+
+        # Extraer sección completa
+        section_text = content_md[start:end]
+
+        # Separar header de body (excluir primera línea que es el header)
+        # Esto evita que headers como "## 4. Sección de Video" aparezcan en el body
+        lines = section_text.split('\n', 1)
+        body = lines[1] if len(lines) > 1 else ""
+
         sections[num] = {"title": title, "body": body}
 
     # Viñetas: líneas que comienzan con "- " en sección 1
@@ -240,7 +248,23 @@ def parse_openai_markdown(content_md: str) -> Dict:
 
     video_body = "\n".join(video_body_lines).strip() if video_body_lines else None
 
+    # Nombre del Producto: extraer de sección 0
+    product_name = None
+    sec0 = sections.get("0", {}).get("body", "")
+
+    # Buscar formato: NombreDelProducto (XXX pzas)
+    for line in sec0.splitlines():
+        line = line.strip()
+        # Buscar línea que contenga (XXX pzas) o (XXX pza)
+        if re.search(r'\(\d+\s+pzas?\)', line, re.IGNORECASE):
+            # Limpiar markdown (**, -, etc)
+            product_name = re.sub(r'^\s*[-*]+\s*', '', line)
+            product_name = re.sub(r'\*\*', '', product_name)
+            product_name = product_name.strip()
+            break
+
     return {
+        "product_name": product_name,
         "bullets": bullets,
         "faq_answers": faq_answers,
         "details": details,
@@ -472,6 +496,76 @@ def metafields_set(shop: str, access_token: str, inputs: List[Dict]) -> Dict:
     return all_results
 
 
+def update_product_title(shop: str, access_token: str, product_id: int, new_title: str) -> Dict:
+    """
+    Actualiza el título del producto en Shopify usando REST API.
+
+    Args:
+        shop: Nombre de la tienda Shopify (sin .myshopify.com)
+        access_token: Token de acceso de Shopify
+        product_id: ID numérico del producto
+        new_title: Nuevo título del producto
+
+    Returns:
+        Diccionario con resultado de la actualización:
+        {
+            'success': bool,
+            'status': int,
+            'product': dict (si success=True),
+            'error': str (si success=False)
+        }
+
+    Example:
+        >>> result = update_product_title("mi-tienda", "shpat_...", 123456, "Dragón Guardián (524 pzas)")
+        >>> if result['success']:
+        ...     print(f"Título actualizado: {result['product']['title']}")
+    """
+    api_version = os.getenv("SHOPIFY_API_VERSION", "2024-07")
+    url = f"https://{shop}.myshopify.com/admin/api/{api_version}/products/{product_id}.json"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Shopify-Access-Token": access_token
+    }
+
+    payload = {
+        "product": {
+            "id": product_id,
+            "title": new_title
+        }
+    }
+
+    try:
+        response = requests.put(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+
+        product_data = response.json().get("product", {})
+
+        return {
+            "success": True,
+            "status": response.status_code,
+            "product": product_data,
+            "old_title": None  # No disponible en esta versión
+        }
+    except requests.RequestException as e:
+        error_msg = str(e)
+        status_code = 0
+
+        if hasattr(e, 'response') and e.response is not None:
+            status_code = e.response.status_code
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get('errors', str(e))
+            except Exception:
+                error_msg = e.response.text or str(e)
+
+        return {
+            "success": False,
+            "error": error_msg,
+            "status": status_code
+        }
+
+
 def ensure_metafield_definitions(shop: str, access_token: str, definitions: List[Dict]) -> Dict:
     """Crea definiciones de metafields necesarias para PRODUCT/namespace custom.
     Ignora errores de duplicado y agrega detalles de errores para diagnóstico.
@@ -517,6 +611,7 @@ def main():
     parser.add_argument("--token", type=str, default=os.getenv("SHOPIFY_ACCESS_TOKEN"), help="Access token de Shopify")
     parser.add_argument("--ids-json", type=str, default=None, help="Ruta a JSON con mapa key->id; si no se provee, se consultará por REST")
     parser.add_argument("--out-json", type=str, default=None, help="Ruta para guardar los updates generados")
+    parser.add_argument("--auto-update-title", action="store_true", help="Actualiza el título del producto automáticamente sin pedir confirmación")
     args = parser.parse_args()
 
     if not args.shop or not args.token:
@@ -530,7 +625,50 @@ def main():
 
     parsed = parse_openai_markdown(content_md)
 
+    # ACTUALIZACIÓN DE TÍTULO DEL PRODUCTO
+    if parsed.get("product_name"):
+        print("\n" + "=" * 70)
+        print(f"📝 Nombre de producto generado por OpenAI:")
+        print(f"   {parsed['product_name']}")
+        print("=" * 70)
+
+        should_update = False
+
+        if args.auto_update_title:
+            # Modo automático: actualizar sin confirmación
+            print("\n🔄 Modo automático: actualizando título sin confirmación...")
+            should_update = True
+        else:
+            # Modo interactivo: preguntar confirmación
+            while True:
+                update_title = input("\n¿Actualizar título del producto en Shopify? (s/n): ").strip().lower()
+                if update_title in ["s", "si", "sí", "y", "yes"]:
+                    should_update = True
+                    break
+                elif update_title in ["n", "no"]:
+                    print("⏭️  Omitiendo actualización de título")
+                    break
+                else:
+                    print("⚠️ Por favor responde 's' para sí o 'n' para no")
+
+        if should_update:
+            print(f"\n🔄 Actualizando título del producto en Shopify...")
+            result = update_product_title(args.shop, args.token, args.product_id, parsed["product_name"])
+
+            if result.get("success"):
+                print(f"✅ Título actualizado exitosamente")
+                print(f"   Nuevo título: {parsed['product_name']}")
+                print(f"   ID del producto: {result['product']['id']}")
+            else:
+                print(f"❌ Error actualizando título:")
+                print(f"   Status: {result.get('status')}")
+                print(f"   Error: {result.get('error')}")
+    else:
+        print("\n⚠️  ADVERTENCIA: No se generó nombre de producto en el análisis de OpenAI")
+        print("   El título del producto en Shopify no se actualizará")
+
     # VALIDACIÓN: Verificar que el parsing extrajo datos válidos
+    has_product_name = parsed.get("product_name") is not None
     has_bullets = len(parsed.get("bullets", [])) > 0
     has_faq = len(parsed.get("faq_answers", [])) > 0
     has_details = len(parsed.get("details", {})) > 0
@@ -563,6 +701,8 @@ def main():
         raise SystemExit(1)
 
     # Advertencia si falta contenido importante
+    if not has_product_name:
+        print("⚠️  ADVERTENCIA: No se generó nombre de producto")
     if not has_bullets:
         print("⚠️  ADVERTENCIA: No se encontraron viñetas en el contenido")
     if not has_faq:
@@ -570,7 +710,10 @@ def main():
     if not has_details:
         print("⚠️  ADVERTENCIA: No se encontraron detalles técnicos en el contenido")
 
-    print(f"✅ Validación exitosa: {len(parsed.get('bullets', []))} viñetas, {len(parsed.get('faq_answers', []))} FAQs, {len(parsed.get('details', {}))} detalles técnicos\n")
+    print(f"✅ Validación exitosa: {len(parsed.get('bullets', []))} viñetas, {len(parsed.get('faq_answers', []))} FAQs, {len(parsed.get('details', {}))} detalles técnicos")
+    if has_product_name:
+        print(f"✅ Nombre de producto: {parsed['product_name']}")
+    print()
 
     if args.ids_json:
         with open(args.ids_json, "r", encoding="utf-8") as f:
